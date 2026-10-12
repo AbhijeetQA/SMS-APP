@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.telephony.SmsManager
@@ -33,6 +34,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvStatus: TextView
     private lateinit var tvCount: TextView
     private lateinit var btnSend: Button
+    private lateinit var btnManual: Button
+    private var manualPeople: List<Person> = emptyList()
+    private var manualTemplate = ""
+    private var manualIdx = 0
+    private var manualActive = false
 
     private val prefs by lazy { getSharedPreferences("bulk_sms", Context.MODE_PRIVATE) }
     private val failed = linkedSetOf<String>()
@@ -70,6 +76,7 @@ class MainActivity : AppCompatActivity() {
         tvStatus = findViewById(R.id.tvStatus)
         tvCount = findViewById(R.id.tvCount)
         btnSend = findViewById(R.id.btnSend)
+        btnManual = findViewById(R.id.btnManual)
 
         ContextCompat.registerReceiver(
             this, sentReceiver, IntentFilter(ACTION_SENT), ContextCompat.RECEIVER_NOT_EXPORTED
@@ -86,6 +93,7 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.btnAdd).setOnClickListener { addRow() }
         btnSend.setOnClickListener { onSendClicked() }
+        btnManual.setOnClickListener { onManualClicked() }
     }
 
     override fun onPause() {
@@ -202,6 +210,49 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton("Send") { _, _ -> sendAll(template, people) }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    // Fallback: opens the normal Messages app for each person with the text pre-filled.
+    private fun onManualClicked() {
+        if (!manualActive) {
+            val template = etTemplate.text.toString().trim()
+            if (template.isEmpty()) {
+                Toast.makeText(this, "Write a message first", Toast.LENGTH_SHORT).show()
+                return
+            }
+            val people = collectPeople() ?: return
+            if (people.isEmpty()) {
+                Toast.makeText(this, "Add at least one person", Toast.LENGTH_SHORT).show()
+                return
+            }
+            savePrefs()
+            manualPeople = people
+            manualTemplate = template
+            manualIdx = 0
+            manualActive = true
+        }
+        openManual()
+    }
+
+    private fun openManual() {
+        val p = manualPeople[manualIdx]
+        val text = manualTemplate.replace("{name}", p.name)
+        val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:${p.phone}")).putExtra("sms_body", text)
+        try {
+            startActivity(intent)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Could not open Messages: ${e.message}", Toast.LENGTH_LONG).show()
+            return
+        }
+        manualIdx++
+        if (manualIdx < manualPeople.size) {
+            btnManual.text = "Next: ${manualPeople[manualIdx].name} (${manualIdx + 1}/${manualPeople.size})"
+            tvStatus.text = "Opened message for ${p.name}. Tap Send in Messages, come back here, then tap Next."
+        } else {
+            manualActive = false
+            btnManual.text = "Send one by one via Messages app"
+            tvStatus.text = "Last message opened for ${p.name}. Tap Send in Messages to finish."
+        }
     }
 
     private fun smsManager(): SmsManager =
