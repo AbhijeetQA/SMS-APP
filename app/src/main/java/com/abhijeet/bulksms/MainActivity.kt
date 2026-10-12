@@ -10,9 +10,14 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.provider.ContactsContract
 import android.os.Bundle
 import android.telephony.SmsManager
 import android.view.View
+import android.view.ViewGroup
+import android.widget.BaseAdapter
+import android.widget.CheckedTextView
+import android.widget.ListView
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -22,6 +27,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.widget.doAfterTextChanged
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -94,6 +100,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnAdd).setOnClickListener { addRow() }
         btnSend.setOnClickListener { onSendClicked() }
         btnManual.setOnClickListener { onManualClicked() }
+        findViewById<Button>(R.id.btnContacts).setOnClickListener { onPickContactsClicked() }
     }
 
     override fun onPause() {
@@ -210,6 +217,147 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton("Send") { _, _ -> sendAll(template, people) }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    // ---------- Phone book ----------
+
+    private data class Contact(val name: String, val number: String)
+
+    private val contactsPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) showContactPicker()
+            else Toast.makeText(this, "Contacts permission is needed to pick from the phone book.", Toast.LENGTH_LONG).show()
+        }
+
+    private fun onPickContactsClicked() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            contactsPermissionLauncher.launch(Manifest.permission.READ_CONTACTS)
+            return
+        }
+        showContactPicker()
+    }
+
+    private fun digitsKey(n: String) = n.filter { it.isDigit() }.takeLast(10)
+
+    private fun loadContacts(): List<Contact> {
+        val seen = HashSet<String>()
+        val out = ArrayList<Contact>()
+        val cols = arrayOf(
+            ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+            ContactsContract.CommonDataKinds.Phone.NUMBER
+        )
+        contentResolver.query(
+            ContactsContract.CommonDataKinds.Phone.CONTENT_URI, cols, null, null,
+            ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " COLLATE NOCASE ASC"
+        )?.use { c ->
+            while (c.moveToNext()) {
+                val name = c.getString(0)?.trim().orEmpty()
+                val num = c.getString(1)?.filter { it.isDigit() || it == '+' }.orEmpty()
+                val key = digitsKey(num)
+                if (name.isEmpty() || key.length < 10 || !seen.add(key)) continue
+                out.add(Contact(name, num))
+            }
+        }
+        return out
+    }
+
+    private fun showContactPicker() {
+        val all = loadContacts()
+        if (all.isEmpty()) {
+            Toast.makeText(this, "No contacts with phone numbers found", Toast.LENGTH_LONG).show()
+            return
+        }
+        val selected = LinkedHashSet<String>()
+        var shown: List<Contact> = all
+
+        val listAdapter = object : BaseAdapter() {
+            override fun getCount() = shown.size
+            override fun getItem(position: Int): Any = shown[position]
+            override fun getItemId(position: Int) = position.toLong()
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val v = (convertView ?: layoutInflater.inflate(
+                    android.R.layout.simple_list_item_multiple_choice, parent, false
+                )) as CheckedTextView
+                val c = shown[position]
+                v.text = c.name + "\n" + c.number
+                v.isChecked = selected.contains(digitsKey(c.number))
+                return v
+            }
+        }
+
+        val search = EditText(this)
+        search.hint = "Search name or number"
+        search.setSingleLine()
+
+        val listView = ListView(this)
+        listView.adapter = listAdapter
+        listView.setOnItemClickListener { _, _, pos, _ ->
+            val k = digitsKey(shown[pos].number)
+            if (!selected.remove(k)) selected.add(k)
+            listAdapter.notifyDataSetChanged()
+        }
+
+        search.doAfterTextChanged { t ->
+            val q = t?.toString()?.trim().orEmpty()
+            shown = if (q.isEmpty()) all
+            else all.filter { it.name.contains(q, ignoreCase = true) || it.number.contains(q) }
+            listAdapter.notifyDataSetChanged()
+        }
+
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        box.setPadding(32, 16, 32, 0)
+        box.addView(search)
+        box.addView(
+            listView,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                (resources.displayMetrics.density * 380).toInt()
+            )
+        )
+
+        AlertDialog.Builder(this)
+            .setTitle("Select people")
+            .setView(box)
+            .setPositiveButton("Add selected") { _, _ ->
+                addSelectedContacts(all.filter { selected.contains(digitsKey(it.number)) })
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun addSelectedContacts(picked: List<Contact>) {
+        // remove empty placeholder rows first
+        for (i in container.childCount - 1 downTo 0) {
+            val r = container.getChildAt(i)
+            if (r.findViewById<EditText>(R.id.etName).text.isBlank() &&
+                r.findViewById<EditText>(R.id.etPhone).text.isBlank()
+            ) container.removeViewAt(i)
+        }
+        val existing = HashSet<String>()
+        for (i in 0 until container.childCount) {
+            existing.add(digitsKey(container.getChildAt(i).findViewById<EditText>(R.id.etPhone).text.toString()))
+        }
+        var added = 0
+        var skipped = 0
+        for (c in picked) {
+            if (!existing.add(digitsKey(c.number))) { skipped++; continue }
+            if (container.childCount >= MAX_PEOPLE) {
+                Toast.makeText(this, "Limit of $MAX_PEOPLE people reached", Toast.LENGTH_LONG).show()
+                break
+            }
+            addRow(c.name, c.number)
+            added++
+        }
+        if (container.childCount == 0) addRow()
+        updateCount()
+        Toast.makeText(
+            this,
+            "Added $added" + if (skipped > 0) " ($skipped already in list)" else "",
+            Toast.LENGTH_LONG
+        ).show()
     }
 
     // Fallback: opens the normal Messages app for each person with the text pre-filled.
