@@ -38,10 +38,18 @@ class MainActivity : AppCompatActivity() {
     private val failed = linkedSetOf<String>()
     @Volatile private var handedOver = 0
     @Volatile private var total = 0
+    @Volatile private var lastError = ""
 
     private val sentReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (resultCode != Activity.RESULT_OK) {
+                lastError = "Carrier/phone result code $resultCode " + when (resultCode) {
+                    SmsManager.RESULT_ERROR_GENERIC_FAILURE -> "(generic failure: check SIM, balance, or SMS permission)"
+                    SmsManager.RESULT_ERROR_NO_SERVICE -> "(no network service)"
+                    SmsManager.RESULT_ERROR_RADIO_OFF -> "(airplane mode / radio off)"
+                    SmsManager.RESULT_ERROR_NULL_PDU -> "(bad message)"
+                    else -> ""
+                }
                 synchronized(failed) { failed.add(intent.getStringExtra("name") ?: "?") }
                 runOnUiThread { showStatus() }
             }
@@ -117,6 +125,7 @@ class MainActivity : AppCompatActivity() {
         tvStatus.text = buildString {
             append("Handed to phone: $handedOver / $total")
             if (bad.isNotEmpty()) append("\nFailed: ${bad.joinToString(", ")}")
+            if (lastError.isNotEmpty()) append("\nReason: $lastError")
         }
     }
 
@@ -204,6 +213,7 @@ class MainActivity : AppCompatActivity() {
         handedOver = 0
         total = people.size
         synchronized(failed) { failed.clear() }
+        lastError = ""
         showStatus()
 
         Thread {
@@ -222,6 +232,7 @@ class MainActivity : AppCompatActivity() {
                     sms.sendMultipartTextMessage(p.phone, null, parts, sentIntents, null)
                     handedOver++
                 } catch (e: Exception) {
+                    lastError = "${e.javaClass.simpleName}: ${e.message}"
                     synchronized(failed) { failed.add(p.name) }
                 }
                 runOnUiThread { showStatus() }
